@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ISL Avatar</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<style>
+  canvas#avatar-canvas { width: 100%; aspect-ratio: 4/3; border-radius: 8px; background: #eee; }
+  #avatar-choice { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 10px; font-size: 0.95rem; }
+  #avatar-choice label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+</style>
+</head>
+<body>
+<main style="max-width: 720px;">
+  <h1>English &rarr; ISL Avatar</h1>
+
+  <div id="avatar-choice">
+    <label><input type="radio" name="avatar-type" value="glb" checked> GLB Avatar</label>
+    <label><input type="radio" name="avatar-type" value="fbx"> FBX Avatar (Waving)</label>
+    <label><input type="radio" name="avatar-type" value="fbx2"> FBX Avatar (New)</label>
+  </div>
+
+  <canvas id="avatar-canvas"></canvas>
+
+  <form id="translate-form">
+    <textarea id="text-input" rows="2" placeholder="Type a sentence, e.g. Thank you"></textarea>
+    <button type="submit">Sign it</button>
+  </form>
+
+  <p id="gloss-line"></p>
+  <p id="missing-line" class="warning" hidden></p>
+  <p id="status"></p>
+</main>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import {
+  createAvatarScene,
+  applyQuaternionPose,
+  quaternionFromArray,
+} from "{{ url_for('static', filename='js/avatarScene.js') }}";
+
+const canvas = document.getElementById("avatar-canvas");
+const form = document.getElementById("translate-form");
+const input = document.getElementById("text-input");
+const glossLine = document.getElementById("gloss-line");
+const missingLine = document.getElementById("missing-line");
+const status = document.getElementById("status");
+const avatarRadios = document.querySelectorAll('input[name="avatar-type"]');
+
+const scenePromise = createAvatarScene(canvas, "glb");
+
+for (const radio of avatarRadios) {
+  radio.addEventListener("change", async (event) => {
+    if (!event.target.checked) return;
+    const ctx = await scenePromise;
+    status.textContent = "Loading avatar...";
+    await ctx.switchAvatar(event.target.value);
+    ctx.resetPose();
+    ctx.render();
+    status.textContent = "";
+  });
+}
+
+function sampleTrack(samples, t) {
+  if (!samples || !samples.length) return null;
+  if (t <= samples[0][0]) return quaternionFromArray(samples[0].slice(1));
+  const last = samples[samples.length - 1];
+  if (t >= last[0]) return quaternionFromArray(last.slice(1));
+  for (let i = 0; i < samples.length - 1; i++) {
+    const t0 = samples[i][0];
+    const t1 = samples[i + 1][0];
+    if (t >= t0 && t <= t1) {
+      const f = t1 === t0 ? 0 : (t - t0) / (t1 - t0);
+      const q0 = quaternionFromArray(samples[i].slice(1));
+      const q1 = quaternionFromArray(samples[i + 1].slice(1));
+      return q0.slerp(q1, f);
+    }
+  }
+  return quaternionFromArray(last.slice(1));
+}
+
+function clipDuration(tracks) {
+  let duration = 0;
+  for (const samples of Object.values(tracks)) {
+    if (samples.length) duration = Math.max(duration, samples[samples.length - 1][0]);
+  }
+  return duration;
+}
+
+function playClip(bones, render, tracks) {
+  const duration = clipDuration(tracks);
+  const boneNames = Object.keys(tracks);
+  return new Promise((resolve) => {
+    let start = null;
+    function frame(now) {
+      if (start === null) start = now;
+      const t = (now - start) / 1000;
+      for (const boneName of boneNames) {
+        const quat = sampleTrack(tracks[boneName], t);
+        if (quat) applyQuaternionPose(bones, boneName, quat);
+      }
+      render();
+      if (t < duration) {
+        requestAnimationFrame(frame);
+      } else {
+        resolve();
+      }
+    }
+    requestAnimationFrame(frame);
+  });
+}
+
+async function playSequence(clipUrls) {
+  const { bones, resetPose, render } = await scenePromise;
+  resetPose();
+  render();
+  for (const url of clipUrls) {
+    const res = await fetch(url);
+    const clip = await res.json();
+    await playClip(bones, render, clip.tracks);
+  }
+  resetPose();
+  render();
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = input.value.trim();
+  if (!text) return;
+
+  status.textContent = "Translating...";
+  try {
+    const res = await fetch("/api/translate_avatar", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      status.textContent = data.error || "Something went wrong.";
+      return;
+    }
+
+    glossLine.textContent = "ISL gloss: " + data.gloss.join(" ");
+    if (data.missing && data.missing.length) {
+      missingLine.textContent = "No sign animation yet for: " + data.missing.join(", ");
+      missingLine.hidden = false;
+    } else {
+      missingLine.hidden = true;
+    }
+
+    status.textContent = data.clip_urls.length ? "Signing..." : "";
+    await playSequence(data.clip_urls);
+    status.textContent = "";
+  } catch (err) {
+    status.textContent = "Request failed: " + err.message;
+  }
+});
+</script>
+</body>
+</html>

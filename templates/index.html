@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>English to ISL</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main>
+  <h1>English &rarr; Indian Sign Language</h1>
+
+  <form id="translate-form">
+    <textarea id="text-input" rows="3" placeholder="Type a sentence, e.g. Thank you"></textarea>
+    <button type="submit">Translate</button>
+  </form>
+
+  <section id="result" hidden>
+    <video id="result-video" controls></video>
+    <p id="gloss-line"></p>
+    <p id="missing-line" class="warning" hidden></p>
+  </section>
+
+  <p id="status"></p>
+</main>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

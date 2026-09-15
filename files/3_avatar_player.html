@@ -1,0 +1,941 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>ISL Avatar — Gesture Player</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0f1117; font-family: 'Segoe UI', sans-serif; color: #f0f0f5; display: flex; height: 100vh; overflow: hidden; }
+
+  #sidebar {
+    width: 280px; min-width: 280px; background: #1a1d27; border-right: 1px solid rgba(255,255,255,0.08);
+    display: flex; flex-direction: column; padding: 1rem; gap: 12px; overflow-y: auto;
+  }
+  #sidebar h2 { font-size: 14px; color: #8b8fa8; text-transform: uppercase; letter-spacing: 0.08em; }
+
+  .gesture-btn {
+    padding: 10px 14px; background: #22263a; border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 10px; color: #f0f0f5; cursor: pointer; text-align: left; font-size: 14px;
+    transition: all 0.15s;
+  }
+  .gesture-btn:hover { border-color: #5b6af0; color: #5b6af0; }
+  .gesture-btn.active { background: rgba(91,106,240,0.15); border-color: #5b6af0; color: #5b6af0; font-weight: 600; }
+
+  .info-card {
+    background: #22263a; border-radius: 10px; padding: 12px;
+    border: 1px solid rgba(255,255,255,0.06); font-size: 12px; color: #8b8fa8; line-height: 1.6;
+  }
+  .info-card strong { color: #f0f0f5; display: block; margin-bottom: 4px; font-size: 13px; }
+
+  .play-btn {
+    padding: 12px; border: none; border-radius: 10px; width: 100%;
+    background: linear-gradient(135deg, #5b6af0, #8b5cf6);
+    color: white; font-size: 15px; font-weight: 600; cursor: pointer;
+    transition: opacity 0.2s;
+  }
+  .play-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .play-btn:hover:not(:disabled) { opacity: 0.88; }
+
+  #progress-bar-wrap { background: #22263a; border-radius: 6px; height: 6px; overflow: hidden; }
+  #progress-bar { height: 100%; width: 0%; background: linear-gradient(90deg, #5b6af0, #8b5cf6); transition: width 0.1s; }
+
+  #status { font-size: 12px; color: #5b6af0; min-height: 16px; }
+
+  #canvas-wrap { flex: 1; position: relative; }
+  #canvas-wrap canvas { display: block; width: 100% !important; height: 100% !important; }
+
+  #overlay {
+    position: absolute; top: 16px; left: 16px;
+    background: rgba(15,17,23,0.75); border-radius: 10px; padding: 10px 14px;
+    font-size: 12px; color: #8b8fa8; backdrop-filter: blur(6px);
+    border: 1px solid rgba(255,255,255,0.06); max-width: 220px;
+  }
+  #overlay .gesture-name { font-size: 18px; font-weight: 700; color: #f0f0f5; margin-bottom: 2px; }
+  #overlay .phase-name   { color: #5b6af0; font-size: 12px; }
+
+  #bone-debug {
+    position: absolute; bottom: 16px; right: 16px;
+    background: rgba(15,17,23,0.75); border-radius: 10px; padding: 10px 14px;
+    font-size: 11px; color: #8b8fa8; font-family: monospace;
+    border: 1px solid rgba(255,255,255,0.06); max-width: 200px; display: none;
+  }
+  #toggle-debug { position: absolute; bottom: 16px; left: 16px; background: #22263a; border: 1px solid rgba(255,255,255,0.08); color: #8b8fa8; padding: 6px 12px; border-radius: 8px; font-size: 11px; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <h2>ISL Gestures</h2>
+
+  <div id="gesture-list">
+    <!-- Buttons injected by JS -->
+  </div>
+
+  <div class="info-card" id="info-card">
+    <strong>Select a gesture</strong>
+    Click a gesture above, then press Perform to watch the avatar sign it.
+  </div>
+
+  <button class="play-btn" id="play-btn" disabled onclick="performGesture()">▶ Perform Sign</button>
+
+  <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
+  <div id="status"></div>
+
+  <div class="info-card">
+    <strong>How this works</strong>
+    1. Landmark JSON is loaded (from your MediaPipe extraction)<br>
+    2. Each frame's bone rotations are applied to the avatar<br>
+    3. Smooth interpolation between frames keeps motion fluid
+  </div>
+</div>
+
+<!-- 3D Canvas -->
+<div id="canvas-wrap">
+  <div id="overlay">
+    <div class="gesture-name" id="ov-gesture">—</div>
+    <div class="phase-name"   id="ov-phase">Ready</div>
+  </div>
+  <div id="bone-debug" id="bone-debug">
+    <div style="color:#f0f0f5;margin-bottom:4px">Live bone rotations</div>
+    <div id="bone-values"></div>
+  </div>
+  <button id="toggle-debug" onclick="toggleDebug()">Show bone data</button>
+</div>
+
+<!-- Three.js + GLTFLoader -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════════
+// THREE.JS SCENE SETUP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const wrap     = document.getElementById('canvas-wrap');
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.shadowMap.enabled = true;
+renderer.outputEncoding = THREE.sRGBEncoding;
+wrap.appendChild(renderer.domElement);
+
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0x0f1117);
+scene.fog = new THREE.Fog(0x0f1117, 8, 20);
+
+const camera = new THREE.PerspectiveCamera(45, wrap.clientWidth / wrap.clientHeight, 0.1, 100);
+camera.position.set(0, 1.4, 3.2);
+
+// Orbit controls — user can rotate/zoom
+const controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 1.0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 1.5;
+controls.maxDistance = 6;
+controls.update();
+
+// Lighting
+const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambient);
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+dirLight.position.set(2, 4, 3);
+dirLight.castShadow = true;
+scene.add(dirLight);
+const fillLight = new THREE.DirectionalLight(0x8090ff, 0.4);
+fillLight.position.set(-2, 2, -2);
+scene.add(fillLight);
+
+// Ground plane
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(10, 10),
+  new THREE.MeshStandardMaterial({ color: 0x1a1d27, roughness: 1 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// Grid helper
+const grid = new THREE.GridHelper(6, 20, 0x2a2d3a, 0x22263a);
+scene.add(grid);
+
+// Resize handler
+window.addEventListener('resize', () => {
+  camera.aspect = wrap.clientWidth / wrap.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AVATAR LOADING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let avatar   = null;   // THREE.Group — the loaded GLTF model
+let skeleton = null;   // THREE.Skeleton
+let bones    = {};     // { boneName: THREE.Bone }
+
+/*
+ * IMPORTANT — AVATAR FILE:
+ * ─────────────────────────
+ * Place your avatar GLB file at: ./avatar.glb
+ *
+ * Recommended free sources:
+ *   1. Ready Player Me:  https://readyplayer.me  → Export as GLB
+ *   2. Mixamo:           https://mixamo.com       → Download FBX, convert to GLB
+ *      (Use online FBX→GLB converter: https://products.aspose.app/3d/conversion/fbx-to-glb)
+ *
+ * The avatar MUST have a humanoid rig with bones named in standard format.
+ * Ready Player Me avatars use this naming convention out of the box.
+ */
+
+const AVATAR_PATH = './avatar.glb';   // ← Change this to your avatar file path
+
+function loadAvatar() {
+  const loader = new THREE.GLTFLoader();
+  setStatus('Loading avatar model...');
+
+  loader.load(
+    AVATAR_PATH,
+
+    // onLoad callback
+    (gltf) => {
+      avatar = gltf.scene;
+      avatar.position.set(0, 0, 0);
+      avatar.scale.set(1, 1, 1);
+      scene.add(avatar);
+
+      // Extract all bones into our bones dict
+      avatar.traverse((obj) => {
+        if (obj.isBone || obj.type === 'Bone') {
+          bones[obj.name] = obj;
+        }
+        // Enable shadows
+        if (obj.isMesh) {
+          obj.castShadow    = true;
+          obj.receiveShadow = true;
+        }
+      });
+
+      console.log('[Avatar] Loaded. Bones found:', Object.keys(bones));
+      setStatus('Avatar ready. Select a gesture.');
+      document.getElementById('play-btn').disabled = false;
+
+      // Set T-pose as default
+      setTPose();
+    },
+
+    // onProgress
+    (xhr) => {
+      const pct = Math.round((xhr.loaded / xhr.total) * 100);
+      setStatus(`Loading avatar: ${pct}%`);
+    },
+
+    // onError
+    (err) => {
+      console.error('[Avatar] Load error:', err);
+      // ── DEMO MODE: create a simple stick figure if no GLB available ──
+      setStatus('No GLB found — running in demo stick-figure mode');
+      createDemoAvatar();
+    }
+  );
+}
+
+// ── Demo avatar (stick figure) when no GLB is present ─────────────────────────
+// This lets you test the bone mapping logic without a real model
+function createDemoAvatar() {
+  const mat  = new THREE.MeshStandardMaterial({ color: 0x5b6af0, roughness: 0.5 });
+  const matL = new THREE.MeshStandardMaterial({ color: 0xf59e0b });
+  const matR = new THREE.MeshStandardMaterial({ color: 0x10b981 });
+
+  const addBone = (name, parent, pos, mat, size = [0.08, 0.25, 0.08]) => {
+    const mesh  = new THREE.Mesh(new THREE.CapsuleGeometry(size[0], size[1], 4, 8), mat);
+    const pivot = new THREE.Object3D();
+    pivot.name  = name;
+    pivot.position.set(...pos);
+    pivot.add(mesh);
+    mesh.position.y = -size[1] / 2;
+    (parent || scene).add(pivot);
+    bones[name] = pivot;
+    return pivot;
+  };
+
+  const hip   = addBone('Hips',           null,  [0, 1.0, 0],  mat);
+  const spine = addBone('Spine',          hip,   [0, 0.25, 0], mat);
+  const chest = addBone('Chest',          spine, [0, 0.25, 0], mat);
+  const neck  = addBone('Neck',           chest, [0, 0.22, 0], mat, [0.06, 0.12, 0.06]);
+  const head  = addBone('Head',           neck,  [0, 0.12, 0], mat, [0.12, 0.18, 0.12]);
+
+  const lshoulder = addBone('LeftShoulder',     chest, [-0.22, 0.18, 0],  matL, [0.07, 0.05, 0.07]);
+  const luarm     = addBone('LeftUpperArm',     lshoulder, [-0.05, -0.05, 0], matL);
+  const lfarm     = addBone('LeftLowerArm',     luarm, [0, -0.28, 0],    matL);
+  const lhand     = addBone('LeftHand',         lfarm, [0, -0.28, 0],    matL, [0.07, 0.12, 0.04]);
+
+  const rshoulder = addBone('RightShoulder',    chest, [0.22, 0.18, 0],   matR, [0.07, 0.05, 0.07]);
+  const ruarm     = addBone('RightUpperArm',    rshoulder, [0.05, -0.05, 0], matR);
+  const rfarm     = addBone('RightLowerArm',    ruarm, [0, -0.28, 0],    matR);
+  const rhand     = addBone('RightHand',        rfarm, [0, -0.28, 0],    matR, [0.07, 0.12, 0.04]);
+
+  // Finger proxies (simplified)
+  ['Index', 'Middle', 'Ring', 'Pinky'].forEach((f, i) => {
+    addBone(`RightHand${f}1`, rhand, [(i-1.5)*0.025, -0.14, 0.02], matR, [0.02, 0.05, 0.02]);
+    addBone(`LeftHand${f}1`,  lhand, [(i-1.5)*0.025, -0.14, 0.02], matL, [0.02, 0.05, 0.02]);
+  });
+  addBone('RightHandThumb1', rhand, [0.06, -0.10, 0.02], matR, [0.02, 0.05, 0.02]);
+  addBone('LeftHandThumb1',  lhand, [-0.06, -0.10, 0.02], matL, [0.02, 0.05, 0.02]);
+
+  console.log('[Demo] Stick figure bones:', Object.keys(bones));
+  setStatus('Demo mode active. Select a gesture.');
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BONE NAME MAPPING
+// ═══════════════════════════════════════════════════════════════════════════════
+/*
+ * Different avatar sources use different bone names.
+ * This map converts our internal rotation keys → your avatar's bone names.
+ *
+ * Ready Player Me bone names are listed as default.
+ * If your avatar uses different names, edit the VALUES here.
+ *
+ * To find your avatar's bone names, run:
+ *   avatar.traverse(obj => { if(obj.isBone) console.log(obj.name); })
+ */
+const BONE_MAP = {
+  // Body
+  'right_upper_arm':  'RightUpperArm',
+  'right_forearm':    'RightLowerArm',
+  'right_wrist':      'RightHand',
+  'left_upper_arm':   'LeftUpperArm',
+  'left_forearm':     'LeftLowerArm',
+  'left_wrist':       'LeftHand',
+
+  // Right hand fingers
+  'right_index_0':    'RightHandIndex1',
+  'right_index_1':    'RightHandIndex2',
+  'right_index_2':    'RightHandIndex3',
+  'right_middle_0':   'RightHandMiddle1',
+  'right_middle_1':   'RightHandMiddle2',
+  'right_middle_2':   'RightHandMiddle3',
+  'right_ring_0':     'RightHandRing1',
+  'right_ring_1':     'RightHandRing2',
+  'right_ring_2':     'RightHandRing3',
+  'right_pinky_0':    'RightHandPinky1',
+  'right_pinky_1':    'RightHandPinky2',
+  'right_pinky_2':    'RightHandPinky3',
+  'right_thumb_0':    'RightHandThumb1',
+  'right_thumb_1':    'RightHandThumb2',
+  'right_thumb_2':    'RightHandThumb3',
+
+  // Left hand fingers
+  'left_index_0':     'LeftHandIndex1',
+  'left_index_1':     'LeftHandIndex2',
+  'left_index_2':     'LeftHandIndex3',
+  'left_middle_0':    'LeftHandMiddle1',
+  'left_middle_1':    'LeftHandMiddle2',
+  'left_middle_2':    'LeftHandMiddle3',
+  'left_ring_0':      'LeftHandRing1',
+  'left_ring_1':      'LeftHandRing2',
+  'left_ring_2':      'LeftHandRing3',
+  'left_pinky_0':     'LeftHandPinky1',
+  'left_pinky_1':     'LeftHandPinky2',
+  'left_pinky_2':     'LeftHandPinky3',
+  'left_thumb_0':     'LeftHandThumb1',
+  'left_thumb_1':     'LeftHandThumb2',
+  'left_thumb_2':     'LeftHandThumb3',
+};
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// APPLY BONE ROTATIONS TO AVATAR
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const euler = new THREE.Euler();
+
+function applyBoneRotations(boneData) {
+  /**
+   * boneData = { "right_upper_arm": [x, y, z], "right_forearm": [...], ... }
+   * Each value is [x, y, z] Euler angles in radians.
+   */
+  const debugLines = [];
+
+  for (const [key, angles] of Object.entries(boneData)) {
+    const boneName = BONE_MAP[key];
+    if (!boneName) continue;
+
+    const bone = bones[boneName];
+    if (!bone) continue;
+
+    // Apply rotation — THREE.Euler order 'XYZ'
+    bone.rotation.set(angles[0], angles[1], angles[2], 'XYZ');
+
+    if (debugLines.length < 6) {
+      debugLines.push(`${boneName}: [${angles.map(a => a.toFixed(2)).join(', ')}]`);
+    }
+  }
+
+  document.getElementById('bone-values').textContent = debugLines.join('\n');
+}
+
+// Smooth interpolation between two bone states (lerp)
+function lerpBones(boneDataA, boneDataB, alpha) {
+  const result = {};
+  const allKeys = new Set([...Object.keys(boneDataA), ...Object.keys(boneDataB)]);
+  allKeys.forEach(key => {
+    const a = boneDataA[key] || [0,0,0];
+    const b = boneDataB[key] || [0,0,0];
+    result[key] = [
+      a[0] + (b[0] - a[0]) * alpha,
+      a[1] + (b[1] - a[1]) * alpha,
+      a[2] + (b[2] - a[2]) * alpha,
+    ];
+  });
+  return result;
+}
+
+// T-pose (neutral standing position)
+function setTPose() {
+  const tPose = {
+    'right_upper_arm': [0,  0, -0.3],
+    'left_upper_arm':  [0,  0,  0.3],
+    'right_forearm':   [0,  0,  0],
+    'left_forearm':    [0,  0,  0],
+  };
+  applyBoneRotations(tPose);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GESTURE DATA — HARDCODED ISL GESTURES
+// ═══════════════════════════════════════════════════════════════════════════════
+/*
+ * These are keyframe-based ISL gesture definitions.
+ * Each gesture has multiple keyframes.
+ * The player interpolates smoothly between them.
+ *
+ * In production: replace these with the JSON output from Steps 1 & 2
+ * (your MediaPipe-extracted, rotation-converted data).
+ *
+ * Rotation values are Euler XYZ angles in RADIANS.
+ * Positive X = tilt forward, Positive Y = rotate left, Positive Z = tilt sideways
+ */
+
+const GESTURE_LIBRARY = {
+
+  "Namaste": {
+    description: "Both palms pressed together at chest height",
+    isl_note:    "Most universally recognized ISL greeting. Slight head bow adds respect.",
+    keyframes: [
+      // Frame 0: T-pose start
+      { time: 0, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'left_upper_arm':  [0, 0,  0.3],
+        'right_forearm':   [0, 0,  0],
+        'left_forearm':    [0, 0,  0],
+      }},
+      // Frame 1: Both arms start raising
+      { time: 0.4, bones: {
+        'right_upper_arm': [-0.5, 0, -0.8],
+        'left_upper_arm':  [-0.5, 0,  0.8],
+        'right_forearm':   [ 0.8, 0,  0],
+        'left_forearm':    [ 0.8, 0,  0],
+      }},
+      // Frame 2: Hands come together at chest — Namaste
+      { time: 0.9, bones: {
+        'right_upper_arm': [-0.6, 0.3, -1.2],
+        'left_upper_arm':  [-0.6,-0.3,  1.2],
+        'right_forearm':   [ 1.2, 0.2,  0.1],
+        'left_forearm':    [ 1.2,-0.2, -0.1],
+        'right_wrist':     [ 0, -0.3, 0],
+        'left_wrist':      [ 0,  0.3, 0],
+        // Fingers straight up — palms pressed
+        'right_index_0':   [0, 0, 0], 'right_middle_0': [0, 0, 0],
+        'right_ring_0':    [0, 0, 0], 'right_pinky_0':  [0, 0, 0],
+        'left_index_0':    [0, 0, 0], 'left_middle_0':  [0, 0, 0],
+        'left_ring_0':     [0, 0, 0], 'left_pinky_0':   [0, 0, 0],
+      }},
+      // Frame 3: Hold Namaste
+      { time: 1.6, bones: {
+        'right_upper_arm': [-0.6, 0.3, -1.2],
+        'left_upper_arm':  [-0.6,-0.3,  1.2],
+        'right_forearm':   [ 1.2, 0.2,  0.1],
+        'left_forearm':    [ 1.2,-0.2, -0.1],
+        'right_wrist':     [ 0, -0.3, 0],
+        'left_wrist':      [ 0,  0.3, 0],
+      }},
+      // Frame 4: Return to T-pose
+      { time: 2.2, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'left_upper_arm':  [0, 0,  0.3],
+        'right_forearm':   [0, 0,  0],
+        'left_forearm':    [0, 0,  0],
+        'right_wrist':     [0, 0, 0],
+        'left_wrist':      [0, 0, 0],
+      }}
+    ]
+  },
+
+  "Hi / Hello": {
+    description: "Open hand raised to side of forehead, gentle wave",
+    isl_note:    "Wave is similar to a salute. Keep warm facial expression.",
+    keyframes: [
+      { time: 0, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+      }},
+      // Raise right arm up to forehead level
+      { time: 0.4, bones: {
+        'right_upper_arm': [-1.0, 0, -0.5],
+        'right_forearm':   [ 0.6, 0,  0],
+        'right_wrist':     [ 0, 0.3, 0],
+        // Open hand — all fingers extended
+        'right_index_0':   [0, 0, 0], 'right_middle_0': [0, 0, 0],
+        'right_ring_0':    [0, 0, 0], 'right_pinky_0':  [0, 0, 0],
+      }},
+      // Wave right
+      { time: 0.8, bones: {
+        'right_upper_arm': [-1.0, 0.1, -0.5],
+        'right_forearm':   [ 0.6, 0, 0],
+        'right_wrist':     [ 0, 0.5, 0.3],
+      }},
+      // Wave left
+      { time: 1.1, bones: {
+        'right_upper_arm': [-1.0,-0.1, -0.5],
+        'right_forearm':   [ 0.6, 0, 0],
+        'right_wrist':     [ 0, -0.4, -0.3],
+      }},
+      // Wave right again
+      { time: 1.4, bones: {
+        'right_upper_arm': [-1.0, 0.1, -0.5],
+        'right_forearm':   [ 0.6, 0, 0],
+        'right_wrist':     [ 0, 0.5, 0.3],
+      }},
+      // Lower arm back
+      { time: 2.0, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+        'right_wrist':     [0, 0, 0],
+      }}
+    ]
+  },
+
+  "Thank You": {
+    description: "Flat hand from chin, extend forward",
+    isl_note:    "Outward movement from chin represents giving thanks. Nod while signing.",
+    keyframes: [
+      { time: 0, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+      }},
+      // Raise hand toward chin
+      { time: 0.5, bones: {
+        'right_upper_arm': [-0.8, 0, -0.5],
+        'right_forearm':   [ 1.4, 0,  0],
+        'right_wrist':     [ 0,  0, 0],
+        // Flat hand — fingers extended
+        'right_index_0':   [0,0,0], 'right_middle_0': [0,0,0],
+        'right_ring_0':    [0,0,0], 'right_pinky_0':  [0,0,0],
+      }},
+      // Touch chin — hand tilted
+      { time: 0.9, bones: {
+        'right_upper_arm': [-0.9, 0.2, -0.6],
+        'right_forearm':   [ 1.5, 0,   0],
+        'right_wrist':     [-0.2, 0, 0],
+      }},
+      // Extend forward and down — thank you
+      { time: 1.4, bones: {
+        'right_upper_arm': [-0.5, 0.3, -0.7],
+        'right_forearm':   [ 0.8, 0,   0],
+        'right_wrist':     [-0.4, 0, 0],
+      }},
+      // Return
+      { time: 2.0, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+        'right_wrist':     [0, 0, 0],
+      }}
+    ]
+  },
+
+  "Sorry": {
+    description: "Closed fist circular motion on chest",
+    isl_note:    "Circular motion on chest = troubled heart. Show apologetic expression.",
+    keyframes: [
+      { time: 0, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+      }},
+      // Form fist and bring to chest
+      { time: 0.5, bones: {
+        'right_upper_arm': [-0.4, 0.3, -0.9],
+        'right_forearm':   [ 1.0, 0,    0],
+        // Curl all fingers — fist
+        'right_index_0':  [1.4,0,0], 'right_index_1':  [1.4,0,0],
+        'right_middle_0': [1.4,0,0], 'right_middle_1': [1.4,0,0],
+        'right_ring_0':   [1.4,0,0], 'right_ring_1':   [1.4,0,0],
+        'right_pinky_0':  [1.4,0,0], 'right_pinky_1':  [1.4,0,0],
+        'right_thumb_0':  [0.5,0.8,0],
+      }},
+      // Circle top
+      { time: 0.9, bones: {
+        'right_upper_arm': [-0.5, 0.3, -0.9],
+        'right_forearm':   [ 1.0, 0.1,  0.1],
+      }},
+      // Circle right
+      { time: 1.2, bones: {
+        'right_upper_arm': [-0.4, 0.2, -1.0],
+        'right_forearm':   [ 1.0, 0,   -0.1],
+      }},
+      // Circle bottom
+      { time: 1.5, bones: {
+        'right_upper_arm': [-0.3, 0.3, -0.9],
+        'right_forearm':   [ 1.0,-0.1,  0.1],
+      }},
+      // Circle left
+      { time: 1.8, bones: {
+        'right_upper_arm': [-0.4, 0.4, -0.9],
+        'right_forearm':   [ 1.0, 0.1,  0.2],
+      }},
+      // Return
+      { time: 2.4, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+        'right_index_0':  [0,0,0], 'right_index_1':  [0,0,0],
+        'right_middle_0': [0,0,0], 'right_middle_1': [0,0,0],
+        'right_ring_0':   [0,0,0], 'right_ring_1':   [0,0,0],
+        'right_pinky_0':  [0,0,0], 'right_pinky_1':  [0,0,0],
+        'right_thumb_0':  [0,0,0],
+      }}
+    ]
+  },
+
+  "Please": {
+    description: "Open palm, circular motion on chest",
+    isl_note:    "Open hand = sincerity. Similar motion to Sorry but palm flat.",
+    keyframes: [
+      { time: 0, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+      }},
+      { time: 0.5, bones: {
+        'right_upper_arm': [-0.4, 0.3, -0.9],
+        'right_forearm':   [ 1.0, 0,    0],
+        // Open palm — fingers straight
+        'right_index_0':  [0,0,0], 'right_middle_0': [0,0,0],
+        'right_ring_0':   [0,0,0], 'right_pinky_0':  [0,0,0],
+        'right_thumb_0':  [0, 0.3, 0],
+        'right_wrist':    [-0.3, 0, 0],
+      }},
+      { time: 0.9,  bones: { 'right_forearm': [1.0, 0.1, 0.1] }},
+      { time: 1.2,  bones: { 'right_forearm': [1.0, 0,  -0.1] }},
+      { time: 1.5,  bones: { 'right_forearm': [1.0,-0.1, 0.1] }},
+      { time: 1.8,  bones: { 'right_forearm': [1.0, 0.1, 0.2] }},
+      { time: 2.4, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+        'right_wrist':     [0, 0, 0],
+      }}
+    ]
+  },
+
+  "How are you?": {
+    description: "Both palms up + raised eyebrows (question)",
+    isl_note:    "Raised eyebrows ARE the question mark in ISL — this is grammatically essential.",
+    keyframes: [
+      { time: 0, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'left_upper_arm':  [0, 0,  0.3],
+      }},
+      // Both arms extend forward, palms up
+      { time: 0.6, bones: {
+        'right_upper_arm': [-0.2, 0.4, -1.0],
+        'left_upper_arm':  [-0.2,-0.4,  1.0],
+        'right_forearm':   [ 0.5, 0,    0],
+        'left_forearm':    [ 0.5, 0,    0],
+        'right_wrist':     [-0.5, 0, 0],   // Palms up = wrist rotates back
+        'left_wrist':      [-0.5, 0, 0],
+        // Open hands
+        'right_index_0': [0,0,0], 'right_middle_0': [0,0,0],
+        'right_ring_0':  [0,0,0], 'right_pinky_0':  [0,0,0],
+        'left_index_0':  [0,0,0], 'left_middle_0':  [0,0,0],
+        'left_ring_0':   [0,0,0], 'left_pinky_0':   [0,0,0],
+      }},
+      // Hold
+      { time: 1.4, bones: {
+        'right_upper_arm': [-0.2, 0.4, -1.0],
+        'left_upper_arm':  [-0.2,-0.4,  1.0],
+        'right_forearm':   [ 0.5, 0,    0],
+        'left_forearm':    [ 0.5, 0,    0],
+        'right_wrist':     [-0.5, 0, 0],
+        'left_wrist':      [-0.5, 0, 0],
+      }},
+      // Return
+      { time: 2.1, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'left_upper_arm':  [0, 0,  0.3],
+        'right_forearm':   [0, 0, 0],
+        'left_forearm':    [0, 0, 0],
+        'right_wrist':     [0, 0, 0],
+        'left_wrist':      [0, 0, 0],
+      }}
+    ]
+  },
+
+  "I am fine": {
+    description: "Point to self, then thumbs up",
+    isl_note:    "Point to yourself first (= I), then thumbs up (= fine). Nod and smile.",
+    keyframes: [
+      { time: 0, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+      }},
+      // Point to self — index finger toward chest
+      { time: 0.5, bones: {
+        'right_upper_arm': [-0.5, 0.2, -0.8],
+        'right_forearm':   [ 1.0, 0,    0],
+        // Point — only index extended
+        'right_index_0':  [0, 0, 0],
+        'right_middle_0': [1.4,0,0], 'right_ring_0': [1.4,0,0], 'right_pinky_0': [1.4,0,0],
+        'right_thumb_0':  [0.5,0.5,0],
+      }},
+      // Thumbs up
+      { time: 1.1, bones: {
+        'right_upper_arm': [-0.2, 0, -0.6],
+        'right_forearm':   [ 0.4, 0,  0],
+        // Curl all except thumb
+        'right_index_0':  [1.4,0,0], 'right_index_1':  [1.4,0,0],
+        'right_middle_0': [1.4,0,0], 'right_middle_1': [1.4,0,0],
+        'right_ring_0':   [1.4,0,0], 'right_ring_1':   [1.4,0,0],
+        'right_pinky_0':  [1.4,0,0], 'right_pinky_1':  [1.4,0,0],
+        // Thumb up — straight
+        'right_thumb_0':  [-0.5, 0.3, 0],
+        'right_wrist':    [0, -0.2, 0],
+      }},
+      // Hold thumbs up
+      { time: 1.8, bones: {
+        'right_upper_arm': [-0.2, 0, -0.6],
+        'right_forearm':   [ 0.4, 0,  0],
+      }},
+      // Return
+      { time: 2.5, bones: {
+        'right_upper_arm': [0, 0, -0.3],
+        'right_forearm':   [0, 0,  0],
+        'right_wrist':     [0, 0, 0],
+        'right_index_0':  [0,0,0], 'right_index_1':  [0,0,0],
+        'right_middle_0': [0,0,0], 'right_middle_1': [0,0,0],
+        'right_ring_0':   [0,0,0], 'right_ring_1':   [0,0,0],
+        'right_pinky_0':  [0,0,0], 'right_pinky_1':  [0,0,0],
+        'right_thumb_0':  [0,0,0],
+      }}
+    ]
+  }
+};
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GESTURE PLAYER ENGINE
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let currentGesture = null;
+let isPlaying      = false;
+let playStart      = null;
+let animFrame      = null;
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function lerpBoneSet(kfA, kfB, alpha) {
+  const bonesA = kfA.bones;
+  const bonesB = kfB.bones;
+  const result = {};
+  const allKeys = new Set([...Object.keys(bonesA), ...Object.keys(bonesB)]);
+  allKeys.forEach(k => {
+    const a = bonesA[k] || [0,0,0];
+    const b = bonesB[k] || [0,0,0];
+    result[k] = [lerp(a[0],b[0],alpha), lerp(a[1],b[1],alpha), lerp(a[2],b[2],alpha)];
+  });
+  return result;
+}
+
+function getInterpolatedFrame(gesture, elapsed) {
+  const kfs = gesture.keyframes;
+  const total = kfs[kfs.length - 1].time;
+
+  // Clamp elapsed to total duration
+  const t = Math.min(elapsed, total);
+
+  // Find surrounding keyframes
+  let i = 0;
+  while (i < kfs.length - 1 && kfs[i + 1].time <= t) i++;
+
+  if (i >= kfs.length - 1) return kfs[kfs.length - 1].bones;
+
+  const kfA  = kfs[i];
+  const kfB  = kfs[i + 1];
+  const span = kfB.time - kfA.time;
+  const alpha = span > 0 ? (t - kfA.time) / span : 1;
+
+  // Ease in-out for smoother motion
+  const eased = alpha < 0.5
+    ? 2 * alpha * alpha
+    : 1 - Math.pow(-2 * alpha + 2, 2) / 2;
+
+  return lerpBoneSet(kfA, kfB, eased);
+}
+
+function performGesture() {
+  if (!currentGesture || isPlaying) return;
+
+  const gesture   = GESTURE_LIBRARY[currentGesture];
+  const totalTime = gesture.keyframes[gesture.keyframes.length - 1].time;
+
+  isPlaying = true;
+  playStart = performance.now();
+  document.getElementById('play-btn').disabled = true;
+  document.getElementById('ov-phase').textContent = 'Performing...';
+
+  function tick() {
+    const elapsed = (performance.now() - playStart) / 1000;  // seconds
+    const progress = Math.min(elapsed / totalTime, 1);
+
+    // Update progress bar
+    document.getElementById('progress-bar').style.width = `${progress * 100}%`;
+
+    // Get interpolated bone rotations for this moment
+    const frameBones = getInterpolatedFrame(gesture, elapsed);
+    applyBoneRotations(frameBones);
+
+    if (progress < 1) {
+      animFrame = requestAnimationFrame(tick);
+    } else {
+      // Done
+      isPlaying = false;
+      document.getElementById('play-btn').disabled = false;
+      document.getElementById('progress-bar').style.width = '0%';
+      document.getElementById('ov-phase').textContent = 'Complete — tap to replay';
+      setStatus('✓ Sign complete');
+    }
+  }
+  tick();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UI — BUILD GESTURE BUTTONS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function selectGesture(name) {
+  currentGesture = name;
+  document.querySelectorAll('.gesture-btn').forEach(b => b.classList.remove('active'));
+  document.querySelector(`[data-name="${name}"]`).classList.add('active');
+
+  const g = GESTURE_LIBRARY[name];
+  document.getElementById('info-card').innerHTML =
+    `<strong>${name}</strong>${g.description}<br><br><em style="color:#f59e0b">💡 ${g.isl_note}</em>`;
+  document.getElementById('ov-gesture').textContent = name;
+  document.getElementById('ov-phase').textContent   = 'Ready';
+  document.getElementById('play-btn').disabled      = false;
+  setStatus('');
+  document.getElementById('progress-bar').style.width = '0%';
+  setTPose();
+}
+
+function buildUI() {
+  const list = document.getElementById('gesture-list');
+  Object.keys(GESTURE_LIBRARY).forEach(name => {
+    const btn = document.createElement('button');
+    btn.className   = 'gesture-btn';
+    btn.dataset.name = name;
+    btn.textContent  = name;
+    btn.onclick      = () => selectGesture(name);
+    list.appendChild(btn);
+  });
+}
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+let debugVisible = false;
+function toggleDebug() {
+  debugVisible = !debugVisible;
+  document.getElementById('bone-debug').style.display = debugVisible ? 'block' : 'none';
+  document.getElementById('toggle-debug').textContent = debugVisible ? 'Hide bone data' : 'Show bone data';
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RENDER LOOP
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LOAD FROM JSON (When you have real MediaPipe data)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function loadGestureFromJSON(jsonPath, gestureName) {
+  /**
+   * Call this to load your real MediaPipe rotation JSON into the player.
+   *
+   * Usage:
+   *   loadGestureFromJSON('./rotation_data/namaste_rotations.json', 'Namaste')
+   *
+   * The JSON format (output of Step 2) is:
+   * {
+   *   "gesture": "namaste",
+   *   "fps": 30,
+   *   "frames": [
+   *     { "frame": 0, "timestamp": 0.0, "bones": { "right_upper_arm": [x,y,z], ... } },
+   *     ...
+   *   ]
+   * }
+   */
+  try {
+    const response = await fetch(jsonPath);
+    const data     = await response.json();
+
+    // Convert frame-based data to keyframe format
+    const keyframes = data.frames.map(f => ({
+      time:  f.timestamp,
+      bones: f.bones
+    }));
+
+    GESTURE_LIBRARY[gestureName] = {
+      description: `Loaded from ${jsonPath}`,
+      isl_note:    'Real MediaPipe landmark data',
+      keyframes
+    };
+
+    // Rebuild UI to include new gesture
+    buildUI();
+    console.log(`[Loaded] ${gestureName} — ${keyframes.length} keyframes from ${jsonPath}`);
+  } catch (err) {
+    console.error('[LoadGesture] Error:', err);
+  }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INIT
+// ═══════════════════════════════════════════════════════════════════════════════
+
+buildUI();
+loadAvatar();
+animate();
+
+// To load your real data, uncomment and edit these lines:
+// loadGestureFromJSON('./rotation_data/namaste_rotations.json', 'Namaste');
+// loadGestureFromJSON('./rotation_data/hi_rotations.json', 'Hi / Hello');
+
+</script>
+</body>
+</html>
