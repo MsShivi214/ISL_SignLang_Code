@@ -14,6 +14,9 @@
   #avatar-choice { display: flex; flex-wrap: wrap; gap: 16px; margin: 6px 0 12px; font-size: 0.95rem; }
   #avatar-choice label { display: flex; align-items: center; gap: 4px; cursor: pointer; width: auto; }
   progress { width: 100%; }
+  #signing-status { margin-top: 10px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+  .signing-label { font-size: 0.8rem; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em; }
+  #currently-signing-word { font-size: 1.15rem; font-weight: 700; margin-top: 2px; }
   #log { font-size: 0.8rem; white-space: pre-wrap; max-height: 160px; overflow-y: auto; opacity: 0.8; }
 </style>
 </head>
@@ -38,6 +41,10 @@
     </div>
     <div class="pane">
       <canvas id="preview-3d"></canvas>
+      <div id="signing-status">
+        <div class="signing-label">Currently Signing</div>
+        <div id="currently-signing-word">Waiting&hellip;</div>
+      </div>
     </div>
   </div>
 
@@ -84,6 +91,11 @@ const signNameInput = document.getElementById("sign-name");
 const saveButton = document.getElementById("save-button");
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
+const currentlySigningWordEl = document.getElementById("currently-signing-word");
+
+function setCurrentlySigning(label) {
+  currentlySigningWordEl.textContent = label ? label.toUpperCase() : "Waiting…";
+}
 
 function log(msg) {
   logEl.textContent += msg + "\n";
@@ -92,6 +104,12 @@ function log(msg) {
 
 let bakedTracks = null;
 let bakedDuration = 0;
+
+// The box under the avatar just shows the selected clip's name -- set once
+// on selection and left alone for the whole preview/bake, since that's the
+// one thing this app can state about a clip with certainty (unlike guessing
+// per-frame content from the video's pixels).
+let currentVideoName = null;
 
 const scenePromise = createAvatarScene(canvas3d, "glb");
 
@@ -117,9 +135,20 @@ async function loadVideoList() {
     opt.textContent = v.name;
     videoSelect.appendChild(opt);
   }
-  if (videos.length) video.src = videos[0].url;
+  if (videos.length) {
+    video.src = videos[0].url;
+    currentVideoName = videos[0].name;
+  } else {
+    currentVideoName = null;
+  }
+  setCurrentlySigning(currentVideoName);
 }
-videoSelect.addEventListener("change", () => { video.src = videoSelect.value; });
+videoSelect.addEventListener("change", () => {
+  video.src = videoSelect.value;
+  const selected = videoSelect.options[videoSelect.selectedIndex];
+  currentVideoName = selected ? selected.textContent : null;
+  setCurrentlySigning(currentVideoName);
+});
 
 function pushSampleQuat(tracks, boneName, t, quat) {
   if (!tracks[boneName]) tracks[boneName] = [];
@@ -198,6 +227,7 @@ async function bake() {
   bakedDuration = duration;
   progressEl.value = 100;
   statusEl.textContent = "Done.";
+  setCurrentlySigning(currentVideoName);
   log(`frames: ${totalFrames}, pose detected: ${framesWithPose}/${totalFrames}, any hand detected: ${framesWithHand}/${totalFrames}`);
   log(`bones tracked: ${Object.keys(tracks).length}`);
   saveRow.hidden = false;

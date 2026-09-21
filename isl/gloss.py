@@ -39,8 +39,8 @@ def to_isl_gloss(text: str):
     nlp = _load()
     doc = nlp(text)
     sentence_glosses = []
-
-    for sent in doc.sents:
+ 
+    for sent in doc.sents: 
         subject_tokens, object_tokens = [], []
         for tok in sent:
             if tok.dep_ in _SUBJECT_DEPS:

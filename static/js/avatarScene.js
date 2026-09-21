@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { buildRestChildDirections } from "./retarget.js";
 
 const MODEL_CONFIG = {
   glb: { format: "glb", url: "/static/avatar/xbot.glb" },
@@ -90,7 +91,38 @@ async function loadAvatarModel(avatarType) {
 
   const bones = collectBones(root);
   const restQuaternions = captureRestQuaternions(bones);
-  return { root, bones, restQuaternions, resetPose: makeResetPose(bones, restQuaternions) };
+  // Same rest-pose-child-direction computation retarget.js uses at bake
+  // time (see its own comment for the geometry) -- needed again here so
+  // baked clips can be correctly re-aimed per avatar at playback time; see
+  // applyRetargetedQuaternionPose() below for why.
+  const restDirs = buildRestChildDirections(bones);
+  return { root, bones, restQuaternions, restDirs, resetPose: makeResetPose(bones, restQuaternions) };
+}
+
+// Every SignAnimations/*.json clip today was baked against the GLB avatar
+// (it's the only one that existed until the FBX avatars were added). Each
+// saved quaternion is the *absolute* result of
+// setFromUnitVectors(GLB_restDir, observedDir) computed during baking --
+// its value is only meaningful relative to GLB's OWN restDir (the fixed
+// local direction its bone points at rest, from buildRestChildDirections).
+// A different skeleton's same-named bone can have a different restDir even
+// with an identical (typically identity) restQuaternion -- confirmed by
+// testing that a restQuaternion-based calibration was a no-op here, since
+// Mixamo rigs bind with identity bone rotations and encode the T-pose
+// shape entirely via bone *positions* instead. So the fix has to work in
+// direction space, not quaternion-delta space: recover the direction the
+// original bake observed (rotate GLB's restDir by the baked quaternion),
+// then re-solve for the rotation that aims *this* avatar's own restDir at
+// that same direction -- see applyRetargetedQuaternionPose() below.
+// getReferenceRestDirs() loads the GLB once (never added to any scene,
+// just to read off this) so it's available regardless of which avatar is
+// actually being shown.
+let _referenceRestDirsPromise = null;
+export function getReferenceRestDirs() {
+  if (!_referenceRestDirsPromise) {
+    _referenceRestDirsPromise = loadAvatarModel("glb").then((m) => m.restDirs);
+  }
+  return _referenceRestDirsPromise;
 }
 
 export async function createAvatarScene(canvas, avatarType = "glb") {
@@ -154,6 +186,7 @@ export async function createAvatarScene(canvas, avatarType = "glb") {
     avatarRoot: null,
     bones: {},
     restQuaternions: {},
+    restDirs: {},
     resetPose: () => {},
   };
 
@@ -170,6 +203,7 @@ export async function createAvatarScene(canvas, avatarType = "glb") {
     ctx.avatarType = type;
     ctx.bones = model.bones;
     ctx.restQuaternions = model.restQuaternions;
+    ctx.restDirs = model.restDirs;
     ctx.resetPose = model.resetPose;
     render();
     return ctx;
@@ -201,6 +235,29 @@ export function applyQuaternionPose(bones, boneName, quat) {
 export function calibratedQuaternion(restQuat, referenceQuat, currentQuat) {
   const delta = referenceQuat.clone().invert().multiply(currentQuat);
   return restQuat.clone().multiply(delta);
+}
+
+const _observedDir = new THREE.Vector3();
+
+// Re-aims a baked quaternion sample (recorded against the reference
+// skeleton's restDir for this bone) onto this avatar's own restDir for the
+// same bone -- see the comment on getReferenceRestDirs() above for why a
+// quaternion-delta calibration doesn't work for this and direction-space
+// re-solving is needed instead. Degrades gracefully to applying the sample
+// unchanged if either skeleton has no restDir for this bone (e.g. it's not
+// one retarget.js tracks) so a bone missing from one side never throws.
+export function applyRetargetedQuaternionPose(bones, restDirs, referenceRestDirs, boneName, quat) {
+  const bone = bones[boneName];
+  if (!bone) return false;
+  const restDir = restDirs[boneName];
+  const referenceDir = referenceRestDirs[boneName];
+  if (!restDir || !referenceDir) {
+    bone.quaternion.copy(quat);
+    return true;
+  }
+  _observedDir.copy(referenceDir).applyQuaternion(quat).normalize();
+  bone.quaternion.setFromUnitVectors(restDir, _observedDir);
+  return true;
 }
 
 export function quaternionToArray(q) {

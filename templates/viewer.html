@@ -9,6 +9,105 @@
   canvas#avatar-canvas { width: 100%; aspect-ratio: 4/3; border-radius: 8px; background: #eee; }
   #avatar-choice { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 10px; font-size: 0.95rem; }
   #avatar-choice label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+
+  #open-translator-btn {
+    margin-top: 32px;
+    padding: 14px 24px;
+    font-size: 1.05rem;
+    font-weight: 600;
+    border: none;
+    border-radius: 10px;
+    background: var(--accent);
+    color: white;
+    cursor: pointer;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 1000;
+  }
+  /* Same specificity as the UA default [hidden]{display:none}, so without
+     this override the rule above (later in the cascade) would win and the
+     "hidden" modal would still render at display:flex, invisible-looking
+     but still intercepting clicks on whatever's behind it. */
+  .modal-overlay[hidden] { display: none; }
+  .modal-panel {
+    width: 100%;
+    max-width: 900px;
+    max-height: 92vh;
+    overflow-y: auto;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  .modal-header h2 { margin: 0; font-size: 1.25rem; }
+  .modal-close {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: inherit;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    font-size: 1.1rem;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .input-modes { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 20px; }
+  .input-mode {
+    flex: 1 1 280px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .input-mode label { font-size: 0.85rem; opacity: 0.75; }
+  .input-mode textarea {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    resize: vertical;
+    font: inherit;
+  }
+  .mode-buttons { display: flex; gap: 8px; }
+  .mode-buttons button { padding: 8px 16px; border: none; border-radius: 8px; cursor: pointer; font-size: 0.9rem; }
+  .translate-btn { background: var(--accent); color: white; }
+  .stop-btn { background: transparent; border: 1px solid var(--border) !important; color: inherit; }
+  .mic-btn {
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.95rem;
+  }
+  .mic-btn.listening { background: var(--accent); color: white; border-color: var(--accent); }
+  .transcript { min-height: 2.4em; font-size: 0.9rem; opacity: 0.85; margin: 0; }
+
+  .avatar-slot { width: 100%; min-height: 400px; }
+  .avatar-slot canvas#avatar-canvas { min-height: 400px; }
+
+  #modal-progress { width: 100%; margin-top: 14px; height: 10px; }
+
+  @media (max-width: 600px) {
+    .modal-panel { padding: 16px; }
+    .input-modes { flex-direction: column; }
+  }
 </style>
 </head>
 <body>
@@ -22,6 +121,7 @@
   </div>
 
   <canvas id="avatar-canvas"></canvas>
+  <div id="avatar-canvas-home" hidden></div>
 
   <form id="translate-form">
     <textarea id="text-input" rows="2" placeholder="Type a sentence, e.g. Thank you"></textarea>
@@ -31,7 +131,45 @@
   <p id="gloss-line"></p>
   <p id="missing-line" class="warning" hidden></p>
   <p id="status"></p>
+
+  <button id="open-translator-btn" type="button">&#128172; Text &amp; Speech Translator</button>
 </main>
+
+<div id="translator-modal" class="modal-overlay" hidden>
+  <div class="modal-panel">
+    <div class="modal-header">
+      <h2>Text &amp; Speech Translator</h2>
+      <button id="close-translator-btn" class="modal-close" type="button" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="input-modes">
+      <div class="input-mode">
+        <label for="modal-text-input">Type your sentence</label>
+        <textarea id="modal-text-input" rows="3" placeholder="Type your sentence..."></textarea>
+        <div class="mode-buttons">
+          <button id="text-translate-btn" class="translate-btn" type="button">Translate</button>
+          <button class="stop-btn" type="button" data-stop>Stop</button>
+        </div>
+      </div>
+
+      <div class="input-mode">
+        <label>Speak now</label>
+        <button id="mic-btn" class="mic-btn" type="button">&#127908; Start speaking</button>
+        <p id="speech-transcript" class="transcript" aria-live="polite"></p>
+        <div class="mode-buttons">
+          <button id="speech-translate-btn" class="translate-btn" type="button">Translate</button>
+          <button class="stop-btn" type="button" data-stop>Stop</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="modal-avatar-slot" class="avatar-slot"></div>
+
+    <progress id="modal-progress" value="0" max="100" hidden></progress>
+    <p id="modal-missing" class="warning" hidden></p>
+    <p id="modal-status"></p>
+  </div>
+</div>
 
 <script type="importmap">
 {
@@ -44,11 +182,14 @@
 <script type="module">
 import {
   createAvatarScene,
-  applyQuaternionPose,
+  applyRetargetedQuaternionPose,
+  getReferenceRestDirs,
   quaternionFromArray,
 } from "{{ url_for('static', filename='js/avatarScene.js') }}";
 
 const canvas = document.getElementById("avatar-canvas");
+const avatarCanvasHome = document.getElementById("avatar-canvas-home");
+
 const form = document.getElementById("translate-form");
 const input = document.getElementById("text-input");
 const glossLine = document.getElementById("gloss-line");
@@ -58,9 +199,19 @@ const avatarRadios = document.querySelectorAll('input[name="avatar-type"]');
 
 const scenePromise = createAvatarScene(canvas, "glb");
 
+// Shared across the main form and the Text & Speech Translator modal --
+// both play through the SAME avatar/scene (the canvas is reparented, not
+// duplicated), so there is one playback token regardless of which entry
+// point started the sequence. Bumping playbackToken cancels whatever's in
+// flight (Stop, a new Translate, or an avatar switch) -- checked every
+// animation frame so cancellation lands within a frame, not just between
+// signs.
+let playbackToken = 0;
+
 for (const radio of avatarRadios) {
   radio.addEventListener("change", async (event) => {
     if (!event.target.checked) return;
+    playbackToken++; // cancel any in-flight sequence -- its bones belong to the skeleton being replaced
     const ctx = await scenePromise;
     status.textContent = "Loading avatar...";
     await ctx.switchAvatar(event.target.value);
@@ -96,20 +247,33 @@ function clipDuration(tracks) {
   return duration;
 }
 
-function playClip(bones, render, tracks) {
+async function fetchClip(url) {
+  const res = await fetch(url);
+  return res.json();
+}
+
+// Every baked clip's quaternions were recorded against the GLB avatar's own
+// rest-pose bone directions -- replaying them unchanged on an avatar whose
+// bones rest at different local directions looks wrong (verified: on the
+// FBX avatar it swung both arms behind the torso instead of in front).
+// applyRetargetedQuaternionPose re-solves each sample against whichever
+// avatar is actually active, so it's a no-op when GLB itself is active and
+// a real correction otherwise. See avatarScene.js for the full reasoning.
+function playOneClip(bones, restDirs, referenceRestDirs, render, tracks, token) {
   const duration = clipDuration(tracks);
   const boneNames = Object.keys(tracks);
   return new Promise((resolve) => {
     let start = null;
     function frame(now) {
+      if (token !== playbackToken) { resolve(); return; }
       if (start === null) start = now;
-      const t = (now - start) / 1000;
+      const animT = (now - start) / 1000;
       for (const boneName of boneNames) {
-        const quat = sampleTrack(tracks[boneName], t);
-        if (quat) applyQuaternionPose(bones, boneName, quat);
+        const quat = sampleTrack(tracks[boneName], animT);
+        if (quat) applyRetargetedQuaternionPose(bones, restDirs, referenceRestDirs, boneName, quat);
       }
       render();
-      if (t < duration) {
+      if (animT < duration) {
         requestAnimationFrame(frame);
       } else {
         resolve();
@@ -119,15 +283,40 @@ function playClip(bones, render, tracks) {
   });
 }
 
-async function playSequence(clipUrls) {
-  const { bones, resetPose, render } = await scenePromise;
+// Brief hold at the avatar's rest pose between signs. Note: this rig's
+// rest/bind pose is a T-pose (arms out to the sides), not arms-at-sides --
+// that's how the Mixamo skeleton this avatar shares is bound, so "neutral"
+// here means T-pose, same as every other reset in this app.
+const SIGN_PAUSE_MS = 400;
+
+// Single sequence player shared by the main form and the modal: items is
+// [{clip_url}] (built from /api/translate_avatar's clip_urls, or the
+// "signs" list from /api/translate_sentence -- same shape either way).
+// Reports progress via the optional onItemStart(i, total) callback (called
+// once per item, plus once more with i === total when the whole sequence
+// finishes) for callers that show a progress bar.
+async function playSignSequence(items, token, onItemStart) {
+  const { bones, restDirs, resetPose, render } = await scenePromise;
+  const referenceRestDirs = await getReferenceRestDirs();
   resetPose();
   render();
-  for (const url of clipUrls) {
-    const res = await fetch(url);
-    const clip = await res.json();
-    await playClip(bones, render, clip.tracks);
+
+  for (let i = 0; i < items.length; i++) {
+    if (token !== playbackToken) return;
+    if (onItemStart) onItemStart(i, items.length);
+
+    const clip = await fetchClip(items[i].clip_url);
+    if (token !== playbackToken) return;
+    await playOneClip(bones, restDirs, referenceRestDirs, render, clip.tracks, token);
+    if (token !== playbackToken) return;
+
+    resetPose();
+    render();
+    await new Promise((resolve) => setTimeout(resolve, SIGN_PAUSE_MS));
   }
+
+  if (token !== playbackToken) return;
+  if (onItemStart) onItemStart(items.length, items.length);
   resetPose();
   render();
 }
@@ -137,6 +326,7 @@ form.addEventListener("submit", async (event) => {
   const text = input.value.trim();
   if (!text) return;
 
+  const token = ++playbackToken;
   status.textContent = "Translating...";
   try {
     const res = await fetch("/api/translate_avatar", {
@@ -145,6 +335,7 @@ form.addEventListener("submit", async (event) => {
       body: JSON.stringify({ text }),
     });
     const data = await res.json();
+    if (token !== playbackToken) return;
     if (!res.ok) {
       status.textContent = data.error || "Something went wrong.";
       return;
@@ -158,13 +349,163 @@ form.addEventListener("submit", async (event) => {
       missingLine.hidden = true;
     }
 
-    status.textContent = data.clip_urls.length ? "Signing..." : "";
-    await playSequence(data.clip_urls);
-    status.textContent = "";
+    const items = (data.clip_urls || []).map((url) => ({ clip_url: url }));
+    status.textContent = items.length ? "Signing..." : "";
+    await playSignSequence(items, token);
+    if (token === playbackToken) status.textContent = "";
   } catch (err) {
-    status.textContent = "Request failed: " + err.message;
+    if (token === playbackToken) status.textContent = "Request failed: " + err.message;
   }
 });
+
+// --- Text & Speech Translator modal: sentence -> avatar-only sequence -
+
+const openBtn = document.getElementById("open-translator-btn");
+const closeBtn = document.getElementById("close-translator-btn");
+const modal = document.getElementById("translator-modal");
+const modalAvatarSlot = document.getElementById("modal-avatar-slot");
+
+const modalTextInput = document.getElementById("modal-text-input");
+const textTranslateBtn = document.getElementById("text-translate-btn");
+const speechTranslateBtn = document.getElementById("speech-translate-btn");
+const stopBtns = document.querySelectorAll("[data-stop]");
+const micBtn = document.getElementById("mic-btn");
+const speechTranscript = document.getElementById("speech-transcript");
+
+const modalProgress = document.getElementById("modal-progress");
+const modalMissing = document.getElementById("modal-missing");
+const modalStatus = document.getElementById("modal-status");
+
+function openModal() {
+  // Reparenting the existing canvas element preserves its WebGL context (it
+  // lives on the element, not its position in the DOM), so this reuses the
+  // same Three.js scene/renderer/bones instead of standing up a second one.
+  // The underlying page just shows an empty slot while the modal has it.
+  modalAvatarSlot.appendChild(canvas);
+  modal.hidden = false;
+}
+
+function closeModal() {
+  avatarCanvasHome.parentNode.insertBefore(canvas, avatarCanvasHome);
+  modal.hidden = true;
+}
+
+openBtn.addEventListener("click", openModal);
+closeBtn.addEventListener("click", closeModal);
+modal.addEventListener("click", (event) => {
+  if (event.target === modal) closeModal();
+});
+
+async function runTranslate(text) {
+  text = text.trim();
+  if (!text) return;
+
+  const token = ++playbackToken;
+  modalStatus.textContent = "Translating...";
+  modalMissing.hidden = true;
+  modalProgress.hidden = true;
+
+  try {
+    const res = await fetch("/api/translate_sentence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const data = await res.json();
+    if (token !== playbackToken) return;
+    if (!res.ok) {
+      modalStatus.textContent = data.error || "Something went wrong.";
+      return;
+    }
+
+    if (data.missing && data.missing.length) {
+      modalMissing.textContent = "Skipped (no sign yet): " + data.missing.join(", ");
+      modalMissing.hidden = false;
+    }
+
+    if (!data.signs.length) {
+      modalStatus.textContent = "Nothing in that sentence could be signed yet.";
+      return;
+    }
+
+    modalProgress.hidden = false;
+    modalProgress.value = 0;
+    modalStatus.textContent = "Signing...";
+    await playSignSequence(data.signs, token, (i, total) => {
+      modalProgress.value = Math.round((100 * i) / total);
+    });
+    if (token === playbackToken) modalStatus.textContent = "";
+  } catch (err) {
+    if (token === playbackToken) modalStatus.textContent = "Request failed: " + err.message;
+  }
+}
+
+function stopPlayback() {
+  playbackToken++; // invalidates any in-flight loop/frame check above
+  scenePromise.then(({ resetPose, render }) => {
+    resetPose();
+    render();
+  });
+  modalStatus.textContent = "Stopped.";
+}
+
+textTranslateBtn.addEventListener("click", () => runTranslate(modalTextInput.value));
+speechTranslateBtn.addEventListener("click", () => runTranslate(speechTranscript.textContent));
+for (const btn of stopBtns) btn.addEventListener("click", stopPlayback);
+
+// --- Speech input (Web Speech API) -------------------------------------
+
+const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+const SILENCE_AUTO_TRANSLATE_MS = 1500;
+let silenceTimer = null;
+
+if (SpeechRecognitionImpl) {
+  const recognition = new SpeechRecognitionImpl();
+  recognition.lang = "en-IN";
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  recognition.addEventListener("result", (event) => {
+    let transcript = "";
+    for (let i = 0; i < event.results.length; i++) {
+      transcript += event.results[i][0].transcript;
+    }
+    speechTranscript.textContent = transcript;
+
+    clearTimeout(silenceTimer);
+    silenceTimer = setTimeout(() => runTranslate(speechTranscript.textContent), SILENCE_AUTO_TRANSLATE_MS);
+  });
+
+  recognition.addEventListener("end", () => {
+    micBtn.classList.remove("listening");
+    micBtn.innerHTML = "&#127908; Start speaking";
+  });
+
+  recognition.addEventListener("error", (event) => {
+    modalStatus.textContent = "Speech recognition error: " + event.error;
+    micBtn.classList.remove("listening");
+    micBtn.innerHTML = "&#127908; Start speaking";
+  });
+
+  micBtn.addEventListener("click", () => {
+    if (micBtn.classList.contains("listening")) {
+      recognition.stop();
+      return;
+    }
+    speechTranscript.textContent = "";
+    try {
+      recognition.start();
+      micBtn.classList.add("listening");
+      micBtn.innerHTML = "&#127908; Listening...";
+    } catch (err) {
+      modalStatus.textContent = "Couldn't start microphone: " + err.message;
+    }
+  });
+} else {
+  micBtn.disabled = true;
+  micBtn.title = "Speech recognition isn't supported in this browser (try Chrome/Edge).";
+  speechTranscript.textContent = "Speech input isn't supported in this browser -- try the text box, or Chrome/Edge for speech.";
+}
 </script>
 </body>
 </html>

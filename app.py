@@ -5,7 +5,7 @@ from flask import Flask, jsonify, render_template, request, send_from_directory
 from werkzeug.utils import secure_filename
 
 from isl.manifest import OUTPUT_DIR, SIGN_ANIM_DIR, VIDEO_DATA_DIR, build_phrase_manifest
-from isl.translate import translate_to_animation_sequence, translate_to_video
+from isl.translate import translate_sentence_to_signs, translate_to_animation_sequence, translate_to_video
 
 app = Flask(__name__)
 
@@ -57,6 +57,25 @@ def api_translate_avatar():
             "gloss": result["gloss"],
             "missing": result["missing"],
             "clip_urls": [f"/animations/{name}" for name in result["clips"]],
+        }
+    )
+
+
+@app.route("/api/translate_sentence", methods=["POST"])
+def api_translate_sentence():
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "text is required"}), 400
+
+    result = translate_sentence_to_signs(text)
+    return jsonify(
+        {
+            "signs": [
+                {"label": sign["label"], "clip_url": f"/animations/{sign['clip']}"}
+                for sign in result["signs"]
+            ],
+            "missing": result["missing"],
         }
     )
 
